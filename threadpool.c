@@ -1,107 +1,152 @@
 #include "threadpool.h"
 
-#define QUEUE_SIZE 65536
+#define MAX_WORKS 8
+#define MAX_TASKS 65536
 
-static void* threadpool_thread(void* threadpool);
+static void* handler(void*arg);
 
-static bool pool_push(queue_pool_t* q, queue_t* task);
-static queue_t* pool_pop(queue_pool_t* q);
-static bool queue_is_full(queue_pool_t* q);
-static bool queue_is_empty(queue_pool_t* q);
-
-queue_pool_t* queue_create(int qsize, int tsize)
+threadpool_t* threadpool_create(int work_size, int task_size)
 {
-    queue_pool_t* q = (queue_pool_t*)malloc(sizeof(queue_pool_t);
-    if(NULL == q){
-        printf("malloc error!\n");
+    threadpool_t* pool = (threadpool_t*)malloc(sizeof(threadpool_t));
+    if(NULL == pool){
+        perror("threadpool malloc!");
         return NULL;
     }
-    if(size < 0) qsize = QUEUE_SIZE;
-    q->tasks = (queue_t*)malloc(QUEUE_SIZE * sizeof(queue_t));
-    q->capacity = QUEUE_SIZE;
-    q->head = q->tail = q->size = q->shutdown = q->waiting_threads = 0;
-    pthread_mutex_init(&(q->mutex), NULL);
-    pthread_cond_init(&(q->cond), NULL);
 
-    q->threads = (pthread_t *)malloc(tsize * sizeof(pthread_t));
-    for(int i=0; i<tsize; i++){
-        if(pthread_create(&(q->threads[i]), NULL, threadpool_thread, (void*)q) != 0){
-            printf("pthread_create error!\n");
-            queue_destory(q);
+    if(task_size <= 0 || task_size > MAX_TASKS) task_size = MAX_TASKS;
+    pool->tasks = (task_t*)malloc(task_size * sizeof(task_t));
+    if(NULL == pool->tasks){
+        perror("tasks malloc!");
+        threadpool_destory(pool);
+        return NULL;
+    }
+
+    if(work_size <=0 || work_size > MAX_WORKS) work_size = MAX_WORKS;
+    pool->workers = (worker_t*)malloc(work_size * sizeof(worker_t));
+    if(NULL == pool->workers){
+        perror("workers malloc!");
+        threadpool_destory(pool);
+        return NULL;
+    }
+
+    for(int i=0; i<work_size; i++){
+        if(0 != pthread_create(&(pool->workers[i].threadid), NULL, handler, (void*)pool)){
+            perror("pthread_create!");
+            threadpool_destory(pool);
             return NULL;
         }
     }
-    return q;
+
+    pool->size = pool->head = pool->tail = pool->waitings = 0;
+    pool->capacity = task_size;
+    pool->worksize = work_size;
+    pthread_mutex_init(&(pool->mutex), NULL);
+    pthread_cond_init(&(pool->cond), NULL);
+
+    return pool;
 }
 
-bool pool_add(queue_pool_t* q, queue_t* task)
+bool tasks_add(threadpool_t* pool, task_t task)
 {
-    if(NULL == q || NULL == task->run)  return false;
-    if(!pool_push(q, task)) return false;
-    return true;
-}
-
-bool pool_push(queue_pool_t* q, queue_t* task)
-{
-    if(queue_is_full(q)) return false;
-    pthread_mutex_lock(&(q->mutex));
-    q->tasks[q->tail] = *task;
-    q->tail = (q->tail+1) % (q->capacity);
-    q->size ++;
-    if(q->waiting_threads > 0){
-        pthread_cond_signal(&(q->cond));
+    if(NULL == pool || NULL == task.func){
+        printf("add task error.\n");
+        return false;
     }
-    pthead_mutex_unlock(&(q->mutex));
+
+    do{
+        if(pool->quit){
+            printf("pool->quit");
+            return false;
+        }
+        if(!task_push_tail(pool, task)){
+            printf("push_tail in add error\n");
+            return false;
+        }
+    }while(0);
 
     return true;
 }
 
-queue_t* pool_pop(queue_pool_t* q)
+bool threadpool_destory(threadpool_t* pool)
 {
-    if(queue_is_empty(q)) return NULL;
-    queue_t* task = NULL;
-    pthread_mutex_lock(&(q->mutex));
-    q->waiting_threads ++;
-    pthread_cond_wait(&(q->cond), &(q->mutex))
-    task->run = q->tasks[q->head].run;
-    task->argv = q->tasks[q->head].argv;
-    q->waiting_threads --;
-    pthread_mutex_unlock(&(q->mutex));
+    pool->quit = 1;
+    for(int i=0; i<pool->worksize; i++){
+        printf("will destory thread\n");
+        if(0 != pthread_join(pool->workers[i].threadid, NULL)){
+            perror("pthread_join");
+        }
+    }
+
+    if(pool->workers)   free(pool->workers);
+    if(pool->tasks)     free(pool->tasks);
+    if(pool)            free(pool);
+
+    return true;
+}
+
+bool task_push_tail(threadpool_t* pool, task_t task)
+{
+    if(tasks_is_full(pool))     return false;
+
+    pthread_mutex_lock(&(pool->mutex));
+
+    pool->tasks[pool->tail].data = task.data;
+    pool->tasks[pool->tail].func = task.func;
+    pool->size ++;
+
+    if(pool->waitings > 0) pthread_cond_signal(&(pool->cond));
+
+    pool->tail = (pool->tail + 1) % pool->capacity;
+    pthread_mutex_unlock(&(pool->mutex));
+    return true;
+}
+
+task_t* task_pop_head(threadpool_t* pool)
+{
+    task_t* task = NULL;
+    pthread_mutex_lock(&(pool->mutex));
+
+    if(tasks_is_empty(pool)){
+        pool->waitings ++;
+        pthread_cond_wait(&(pool->cond), &(pool->mutex));
+        pool->waitings --;
+    }
+
+    task = &(pool->tasks[pool->head]);
+/*     task->func = pool->tasks[pool->head].func;
+    task->data = pool->tasks[pool->head].data; */
+    pool->size --;
+    pool->head = (pool->head + 1) % pool->capacity;
+
+    pthread_mutex_unlock(&(pool->mutex));
     return task;
 }
 
-void* threadpool_thread(void* threadpool)
+bool tasks_is_full(threadpool_t* pool)
 {
-    queue_t* task = NULL;
-    queue_pool_t *q = (queue_pool_t*)threadpool;
+    return pool->size == pool->capacity;
+}
+
+bool tasks_is_empty(threadpool_t* pool)
+{
+    return pool->size == 0;
+}
+
+void* handler(void*arg)
+{
+    threadpool_t* pool = (threadpool_t*)arg;
+
     while(1){
-        task = pool_pop(q);
+        task_t* task = task_pop_head(pool);
         if(NULL != task){
-            task->run(task->argv);
+            task->func(task->data);
         }
-        if(q->shutdown == 1){
-            printf("thread %d is exit.\n", pthread_self());
+        printf("%d thread size %d \n", pool->size, pthread_self());
+        if(pool->quit && tasks_is_empty(pool)){
+            printf("exit thread\n");
             break;
         }
     }
+
     return NULL;
-}
-
-bool queue_is_full(queue_pool_t* q)
-{
-    return q->size == q->capacity;
-}
-
-bool queue_is_empty(queue_pool_t* q)
-{
-    return q->size == 0;
-}
-
-bool queue_destory(queue_pool_t *q)
-{
-    q->shutdown = 1;
-    free(q->tasks);
-    free(q->threads);
-    free(q);
-    return true;
 }
