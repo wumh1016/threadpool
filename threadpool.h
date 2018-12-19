@@ -26,7 +26,7 @@ typedef struct threadpool{
     int size;
     int capacity;
     int worksize;
-    int waitings;
+    int waitings;       // 等待任务数
     int quit;           // 0:不退出; 1:退出
     worker_t* workers;
     task_t* tasks;
@@ -34,7 +34,7 @@ typedef struct threadpool{
     pthread_cond_t cond;
 }threadpool_t;
 
-threadpool_t* threadpool_create(int work_size, int task_size);
+threadpool_t* threadpool_create(int work_size, int queue_size);
 bool tasks_add(threadpool_t* pool, task_t task);
 bool threadpool_destory(threadpool_t* pool);
 bool task_push_tail(threadpool_t* pool, task_t task);
